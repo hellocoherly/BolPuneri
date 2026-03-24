@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
-import { prisma } from "@/lib/db"
+import { db } from "@/lib/firebase"
 import { auth } from "@/lib/auth"
+import { FieldValue } from "firebase-admin/firestore"
 
 const AI_DAILY_LIMIT = parseInt(process.env.AI_DAILY_LIMIT || "10")
 
@@ -88,24 +89,25 @@ export async function POST(request: Request) {
   }
 
   // Check daily limit
-  const user = await prisma.user.findUnique({ where: { id: session.user.id } })
-  if (!user) {
+  const userRef = db.collection("users").doc(session.user.id)
+  const userDoc = await userRef.get()
+  if (!userDoc.exists) {
     return NextResponse.json({ error: "User not found" }, { status: 404 })
   }
 
+  const user = userDoc.data()!
   const now = new Date()
   const resetTime = user.aiUsageResetAt ? new Date(user.aiUsageResetAt) : null
+  let currentUsageCount = user.aiUsageCount || 0
 
   if (!resetTime || now > resetTime) {
     // Reset usage counter
-    await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        aiUsageCount: 0,
-        aiUsageResetAt: new Date(now.getTime() + 24 * 60 * 60 * 1000),
-      },
+    await userRef.update({
+      aiUsageCount: 0,
+      aiUsageResetAt: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
     })
-  } else if (user.aiUsageCount >= AI_DAILY_LIMIT) {
+    currentUsageCount = 0
+  } else if (currentUsageCount >= AI_DAILY_LIMIT) {
     return NextResponse.json(
       { error: `Daily AI generation limit (${AI_DAILY_LIMIT}) reached. Try again tomorrow!` },
       { status: 429 }
@@ -137,12 +139,11 @@ export async function POST(request: Request) {
     }
 
     // Increment usage
-    await prisma.user.update({
-      where: { id: session.user.id },
-      data: { aiUsageCount: { increment: 1 } },
+    await userRef.update({
+      aiUsageCount: FieldValue.increment(1),
     })
 
-    return NextResponse.json({ generated: result, remainingUsage: AI_DAILY_LIMIT - (user.aiUsageCount + 1) })
+    return NextResponse.json({ generated: result, remainingUsage: AI_DAILY_LIMIT - (currentUsageCount + 1) })
   } catch (error) {
     return NextResponse.json({ error: "Generation failed" }, { status: 500 })
   }

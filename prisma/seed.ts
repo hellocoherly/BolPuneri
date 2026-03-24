@@ -1,20 +1,46 @@
-import { PrismaClient } from "@prisma/client"
+import { initializeApp, cert, type ServiceAccount } from "firebase-admin/app"
+import { getFirestore } from "firebase-admin/firestore"
 import bcrypt from "bcryptjs"
 
-const prisma = new PrismaClient()
+const serviceAccount: ServiceAccount = {
+  projectId: process.env.FIREBASE_PROJECT_ID,
+  clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+  privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+}
+
+initializeApp({ credential: cert(serviceAccount) })
+const db = getFirestore()
 
 async function main() {
   // Create demo user
   const hashedPassword = await bcrypt.hash("demo1234", 10)
-  const user = await prisma.user.upsert({
-    where: { email: "demo@bolpuneri.ai" },
-    update: {},
-    create: {
+  const now = new Date().toISOString()
+
+  // Check if demo user exists
+  const existingUsers = await db
+    .collection("users")
+    .where("email", "==", "demo@bolpuneri.ai")
+    .limit(1)
+    .get()
+
+  let userId: string
+  if (!existingUsers.empty) {
+    userId = existingUsers.docs[0].id
+    console.log("Demo user already exists:", userId)
+  } else {
+    const userRef = await db.collection("users").add({
       name: "पुणेकर Demo",
       email: "demo@bolpuneri.ai",
       password: hashedPassword,
-    },
-  })
+      image: null,
+      aiUsageCount: 0,
+      aiUsageResetAt: null,
+      createdAt: now,
+      updatedAt: now,
+    })
+    userId = userRef.id
+    console.log("Created demo user:", userId)
+  }
 
   // Seed content
   const seedContent = [
@@ -84,15 +110,23 @@ async function main() {
     },
   ]
 
+  const batch = db.batch()
   for (const item of seedContent) {
-    await prisma.content.create({
-      data: { ...item, authorId: user.id },
+    const ref = db.collection("contents").doc()
+    batch.set(ref, {
+      ...item,
+      authorId: userId,
+      imageUrl: null,
+      likesCount: 0,
+      dislikesCount: 0,
+      sharesCount: 0,
+      createdAt: now,
+      updatedAt: now,
     })
   }
+  await batch.commit()
 
   console.log("Seed completed: 1 user, 8 content items")
 }
 
-main()
-  .catch(console.error)
-  .finally(() => prisma.$disconnect())
+main().catch(console.error)

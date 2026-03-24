@@ -1,11 +1,9 @@
 import NextAuth from "next-auth"
 import CredentialsProvider from "next-auth/providers/credentials"
-import { PrismaAdapter } from "@auth/prisma-adapter"
-import { prisma } from "@/lib/db"
+import { db } from "@/lib/firebase"
 import bcrypt from "bcryptjs"
 
 export const { handlers, signIn, signOut, auth } = NextAuth({
-  adapter: PrismaAdapter(prisma) as any,
   session: { strategy: "jwt" },
   pages: {
     signIn: "/login",
@@ -20,11 +18,18 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       async authorize(credentials) {
         if (!credentials?.email || !credentials?.password) return null
 
-        const user = await prisma.user.findUnique({
-          where: { email: credentials.email as string },
-        })
+        const usersRef = db.collection("users")
+        const snapshot = await usersRef
+          .where("email", "==", credentials.email as string)
+          .limit(1)
+          .get()
 
-        if (!user || !user.password) return null
+        if (snapshot.empty) return null
+
+        const userDoc = snapshot.docs[0]
+        const user = userDoc.data()
+
+        if (!user.password) return null
 
         const isValid = await bcrypt.compare(
           credentials.password as string,
@@ -33,7 +38,12 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
 
         if (!isValid) return null
 
-        return { id: user.id, name: user.name, email: user.email, image: user.image }
+        return {
+          id: userDoc.id,
+          name: user.name,
+          email: user.email,
+          image: user.image,
+        }
       },
     }),
   ],

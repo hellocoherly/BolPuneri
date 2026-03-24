@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { prisma } from "@/lib/db"
+import { db } from "@/lib/firebase"
 import { auth } from "@/lib/auth"
 
 const VALID_TYPES = ["PATYA", "UKHANE", "MEME"]
@@ -14,20 +14,41 @@ export async function GET(request: NextRequest) {
   const page = parseInt(searchParams.get("page") || "1")
   const limit = parseInt(searchParams.get("limit") || "20")
 
-  const where: any = {}
-  if (type && VALID_TYPES.includes(type)) where.type = type
-  if (category && VALID_CATEGORIES.includes(category)) where.category = category
+  let query: FirebaseFirestore.Query = db.collection("contents")
 
-  const [contents, total] = await Promise.all([
-    prisma.content.findMany({
-      where,
-      include: { author: { select: { id: true, name: true, image: true } } },
-      orderBy: { createdAt: "desc" },
-      skip: (page - 1) * limit,
-      take: limit,
-    }),
-    prisma.content.count({ where }),
-  ])
+  if (type && VALID_TYPES.includes(type)) {
+    query = query.where("type", "==", type)
+  }
+  if (category && VALID_CATEGORIES.includes(category)) {
+    query = query.where("category", "==", category)
+  }
+
+  query = query.orderBy("createdAt", "desc")
+
+  // Get total count (Firestore doesn't have a built-in count for filtered queries easily,
+  // so we fetch all IDs for count, then paginate)
+  const countSnapshot = await query.select().get()
+  const total = countSnapshot.size
+
+  // Paginate
+  const offset = (page - 1) * limit
+  const snapshot = await query.offset(offset).limit(limit).get()
+
+  const contents = await Promise.all(
+    snapshot.docs.map(async (doc) => {
+      const data = doc.data()
+      // Fetch author
+      let author = { id: data.authorId, name: null, image: null }
+      if (data.authorId) {
+        const authorDoc = await db.collection("users").doc(data.authorId).get()
+        if (authorDoc.exists) {
+          const authorData = authorDoc.data()!
+          author = { id: authorDoc.id, name: authorData.name, image: authorData.image }
+        }
+      }
+      return { id: doc.id, ...data, author }
+    })
+  )
 
   return NextResponse.json({ contents, total, page, totalPages: Math.ceil(total / limit) })
 }
@@ -56,20 +77,37 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Content text is required" }, { status: 400 })
     }
 
-    const content = await prisma.content.create({
-      data: {
-        type,
-        category,
-        language,
-        textMarathi: textMarathi || null,
-        textEnglish: textEnglish || null,
-        isAIGenerated: isAIGenerated || false,
-        authorId: session.user.id,
-      },
-      include: { author: { select: { id: true, name: true, image: true } } },
-    })
+    const now = new Date().toISOString()
+    const contentData = {
+      type,
+      category,
+      language,
+      textMarathi: textMarathi || null,
+      textEnglish: textEnglish || null,
+      isAIGenerated: isAIGenerated || false,
+      authorId: session.user.id,
+      likesCount: 0,
+      dislikesCount: 0,
+      sharesCount: 0,
+      createdAt: now,
+      updatedAt: now,
+    }
 
-    return NextResponse.json({ content }, { status: 201 })
+    const docRef = await db.collection("contents").add(contentData)
+
+    // Fetch author info
+    const authorDoc = await db.collection("users").doc(session.user.id).get()
+    const authorData = authorDoc.exists ? authorDoc.data()! : {}
+    const author = {
+      id: session.user.id,
+      name: authorData.name || null,
+      image: authorData.image || null,
+    }
+
+    return NextResponse.json(
+      { content: { id: docRef.id, ...contentData, author } },
+      { status: 201 }
+    )
   } catch (error) {
     return NextResponse.json({ error: "Something went wrong" }, { status: 500 })
   }

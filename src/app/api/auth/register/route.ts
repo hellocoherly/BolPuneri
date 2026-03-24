@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import bcrypt from "bcryptjs"
-import { prisma } from "@/lib/db"
+import { db } from "@/lib/firebase"
 
 export async function POST(request: Request) {
   try {
@@ -13,8 +13,13 @@ export async function POST(request: Request) {
       )
     }
 
-    const existingUser = await prisma.user.findUnique({ where: { email } })
-    if (existingUser) {
+    const existingUsers = await db
+      .collection("users")
+      .where("email", "==", email)
+      .limit(1)
+      .get()
+
+    if (!existingUsers.empty) {
       return NextResponse.json(
         { error: "User already exists" },
         { status: 400 }
@@ -22,12 +27,19 @@ export async function POST(request: Request) {
     }
 
     const hashedPassword = await bcrypt.hash(password, 10)
-    const user = await prisma.user.create({
-      data: { name, email, password: hashedPassword },
+    const userRef = await db.collection("users").add({
+      name: name || null,
+      email,
+      password: hashedPassword,
+      image: null,
+      aiUsageCount: 0,
+      aiUsageResetAt: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     })
 
     return NextResponse.json(
-      { user: { id: user.id, name: user.name, email: user.email } },
+      { user: { id: userRef.id, name, email } },
       { status: 201 }
     )
   } catch (error) {
